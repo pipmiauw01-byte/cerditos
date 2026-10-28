@@ -25,7 +25,7 @@ import kotlin.math.abs
  * Servicio de accesibilidad: muestra un panelcito flotante sobre el juego.
  *  - Analizar: captura la pantalla y dibuja el orden (1, 2, 3…) sobre cada cerdito.
  *  - Siguiente: toca por ti el cerdito #1 y vuelve a analizar.
- *  - Auto: juega solo. Saca cerditos (varios a la vez si sus caminos no se cruzan); si no ve
+ *  - Auto: juega solo, un cerdito por segundo; si no ve
  *    cerditos, revisa 3 veces en 30 s por si carga otro nivel; si algo tapa el juego espera,
  *    y si es una ventana con X (como el cofre), la cierra con la X. Nunca toca "Get".
  */
@@ -370,23 +370,26 @@ class PigService : AccessibilityService() {
                 return@analyzeScreen
             }
 
-            // 6) tocar: varias salidas seguidas si sus recorridos no se cruzan
-            val batch = if (single) plan.moves.take(1) else solver.firstBatch(plan)
+            // 6) tocar el próximo, a ritmo de un cerdito por segundo
+            val next = plan.moves[0]
             overlay?.show(pigs, plan, onlyNext = true)
             setStatus(
-                "Quedan ${pigs.size}. " + when {
-                    !batch[0].exits -> "Acerco un cerdito para abrir camino…"
-                    batch.size > 1 -> "Saco ${batch.size} a la vez…"
-                    else -> "Saco uno con el camino libre…"
-                }
+                "Quedan ${pigs.size}. " +
+                    (if (next.exits) "Saco uno con el camino libre…" else "Acerco un cerdito para abrir camino…")
             )
             lastCount = pigs.size
-            lastBatchExits = batch.count { it.exits }
-            recentTaps = batch.map { Tapped(pigs[it.pig], it.exits, it.dist) }
-            tapSequence(batch.map { pigs[it.pig] }) {
-                if (single) main.postDelayed({ busy = false; analyze() }, SETTLE_MS)
-                else again(if (batch[0].exits) SETTLE_MS else SLIDE_SETTLE_MS)
-            }
+            lastBatchExits = if (next.exits) 1 else 0
+            recentTaps = listOf(Tapped(pigs[next.pig], next.exits, next.dist))
+            val target = pigs[next.pig]
+            val wait = if (single) 0L else (lastTapAt + TAP_INTERVAL_MS - System.currentTimeMillis()).coerceAtLeast(0L)
+            main.postDelayed({
+                if (!single && !auto) { busy = false; return@postDelayed }
+                lastTapAt = System.currentTimeMillis()
+                tap(target.cx, target.cy) {
+                    if (single) main.postDelayed({ busy = false; analyze() }, SETTLE_MS)
+                    else again(SETTLE_MS)
+                }
+            }, wait)
         }
     }
 
@@ -398,6 +401,7 @@ class PigService : AccessibilityService() {
     private var lastCount = -1
     private var lastBatchExits = 0
     private var suspicious = 0
+    private var lastTapAt = 0L
 
     /** ¿Hay un cerdito a medio camino en el recorrido de uno que acabamos de tocar? */
     private fun stillMoving(pigs: List<Pig>): Boolean {
@@ -414,14 +418,6 @@ class PigService : AccessibilityService() {
             }
         }
         return false
-    }
-
-    private fun tapSequence(targets: List<Pig>, done: () -> Unit) {
-        if (targets.isEmpty()) { done(); return }
-        tap(targets[0].cx, targets[0].cy) {
-            if (targets.size == 1) done()
-            else main.postDelayed({ tapSequence(targets.drop(1), done) }, TAP_GAP_MS)
-        }
     }
 
     private fun tap(x: Float, y: Float, done: () -> Unit) {
@@ -459,9 +455,8 @@ class PigService : AccessibilityService() {
 
     companion object {
         private const val HIDE_MS = 70L                 // esconder el panel antes de capturar
-        private const val TAP_GAP_MS = 90L              // entre toques de una misma tanda
-        private const val SETTLE_MS = 350L              // después de sacar cerditos
-        private const val SLIDE_SETTLE_MS = 350L        // después de acercar uno
+        private const val TAP_INTERVAL_MS = 1_000L      // ritmo del auto: un toque por segundo
+        private const val SETTLE_MS = 450L              // espera antes de volver a mirar
         private const val MOVING_RECHECK_MS = 200L      // si alguno sigue corriendo
         private const val SUSPICIOUS_RECHECK_MS = 600L  // si faltan cerditos de golpe
         private const val EMPTY_WAIT_MS = 10_000L       // sin cerditos: 3 revisiones cada 10 s = 30 s
