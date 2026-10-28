@@ -167,6 +167,45 @@ class Solver(private val pigs: List<Pig>) {
         return false
     }
 
+    /**
+     * Toques del comienzo del plan que se pueden hacer seguidos, sin esperar a que termine la
+     * animación: salidas cuyos recorridos no se cruzan entre sí. Un avance va siempre solo.
+     */
+    fun firstBatch(plan: Plan, max: Int = 4): List<Move> {
+        val m = plan.moves
+        if (m.isEmpty()) return emptyList()
+        if (!m[0].exits) return listOf(m[0])
+        val out = arrayListOf(m[0])
+        for (k in 1 until m.size) {
+            val mv = m[k]
+            if (!mv.exits || out.size >= max) break
+            if (out.any { it.pig == mv.pig || sweepsCross(it.pig, mv.pig) }) break
+            out.add(mv)
+        }
+        return out
+    }
+
+    /** ¿Se cruzan los recorridos de salida de i y j (desde su cola hasta fuera de la pantalla)? */
+    private fun sweepsCross(i: Int, j: Int): Boolean {
+        val far = 6000f
+        val a = (far + halfLen) / 2f
+        val mix = pigs[i].cx + dx[i] * (far - halfLen) / 2f
+        val miy = pigs[i].cy + dy[i] * (far - halfLen) / 2f
+        val mjx = pigs[j].cx + dx[j] * (far - halfLen) / 2f
+        val mjy = pigs[j].cy + dy[j] * (far - halfLen) / 2f
+        val axes = arrayOf(
+            floatArrayOf(dx[i], dy[i]), floatArrayOf(-dy[i], dx[i]),
+            floatArrayOf(dx[j], dy[j]), floatArrayOf(-dy[j], dx[j])
+        )
+        for (u in axes) {
+            val dist = abs((mjx - mix) * u[0] + (mjy - miy) * u[1])
+            val ri = a * abs(dx[i] * u[0] + dy[i] * u[1]) + halfWid * abs(-dy[i] * u[0] + dx[i] * u[1])
+            val rj = a * abs(dx[j] * u[0] + dy[j] * u[1]) + halfWid * abs(-dy[j] * u[0] + dx[j] * u[1])
+            if (dist >= ri + rj - eps) return false // hay un eje que los separa
+        }
+        return true
+    }
+
     fun solve(budgetMs: Long = 2500): Plan {
         if (n == 0) return Plan(emptyList(), emptyList(), null)
         val px = FloatArray(n) { pigs[it].cx }

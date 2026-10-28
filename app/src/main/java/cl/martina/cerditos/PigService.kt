@@ -25,7 +25,9 @@ import kotlin.math.abs
  * Servicio de accesibilidad: muestra un panelcito flotante sobre el juego.
  *  - Analizar: captura la pantalla y dibuja el orden (1, 2, 3…) sobre cada cerdito.
  *  - Siguiente: toca por ti el cerdito #1 y vuelve a analizar.
- *  - Auto: repite "Siguiente" hasta vaciar el nivel (o hasta un atasco).
+ *  - Auto: juega solo. Saca cerditos (varios a la vez si sus caminos no se cruzan); si no ve
+ *    cerditos, revisa 3 veces en 30 s por si carga otro nivel; si algo tapa el juego espera,
+ *    y si es una ventana con X (como el cofre), la cierra con la X. Nunca toca "Get".
  */
 class PigService : AccessibilityService() {
 
@@ -122,7 +124,7 @@ class PigService : AccessibilityService() {
         val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         autoBtn = button("Auto ▶", Color.rgb(30, 90, 220)) { toggleAuto() }
         row2.addView(autoBtn)
-        row2.addView(button("Borrar", Color.rgb(120, 120, 120)) { stopAuto(); overlay?.clear(); setStatus("Listo para analizar.") })
+        row2.addView(button("Borrar", Color.rgb(120, 120, 120)) { stopAuto(); busy = false; overlay?.clear(); setStatus("Listo para analizar.") })
         body.addView(row2)
         root.addView(body)
 
@@ -191,8 +193,8 @@ class PigService : AccessibilityService() {
 
     // ---------------------------------------------------------------- captura
 
-    /** Esconde nuestras capas, saca captura y las vuelve a mostrar. */
-    private fun capture(cb: (Bitmap?) -> Unit) {
+    /** Esconde nuestras capas, saca captura y las vuelve a mostrar. Reintenta si Android pide esperar. */
+    private fun capture(attempt: Int = 0, cb: (Bitmap?) -> Unit) {
         overlay?.visibility = View.INVISIBLE
         panel?.visibility = View.INVISIBLE
         fun restore() { overlay?.visibility = View.VISIBLE; panel?.visibility = View.VISIBLE }
@@ -210,13 +212,15 @@ class PigService : AccessibilityService() {
 
                 override fun onFailure(errorCode: Int) {
                     restore()
-                    cb(null)
+                    // Android limita cuántas capturas por segundo: se espera un poco y se reintenta
+                    if (attempt < 4) main.postDelayed({ capture(attempt + 1, cb) }, 350L)
+                    else cb(null)
                 }
             })
-        }, 150)
+        }, HIDE_MS)
     }
 
-    private fun analyzeScreen(done: (List<Pig>, Plan) -> Unit) {
+    private fun analyzeScreen(done: (Scene, Solver?, Plan?) -> Unit) {
         capture { bmp ->
             if (bmp == null) {
                 busy = false
@@ -225,10 +229,11 @@ class PigService : AccessibilityService() {
                 return@capture
             }
             worker.execute {
-                val pigs = Detector.detect(bmp)
+                val scene = Detector.detect(bmp)
                 bmp.recycle()
-                val plan = Solver(pigs).solve()
-                main.post { done(pigs, plan) }
+                val solver = if (scene.pigs.isNotEmpty()) Solver(scene.pigs) else null
+                val plan = solver?.solve()
+                main.post { done(scene, solver, plan) }
             }
         }
     }
@@ -239,76 +244,183 @@ class PigService : AccessibilityService() {
         if (busy) return
         busy = true
         setStatus("Mirando…")
-        analyzeScreen { pigs, plan ->
+        analyzeScreen { scene, _, plan ->
             busy = false
-            overlay?.show(pigs, plan)
-            setStatus(describe(pigs, plan))
+            when {
+                scene.obstructed -> { overlay?.clear(); setStatus("Hay una ventana encima del juego. Ciérrala y vuelve a analizar.") }
+                plan == null -> { overlay?.clear(); setStatus("No veo cerditos en pantalla.") }
+                else -> { overlay?.show(scene.pigs, plan); setStatus(describe(scene.pigs, plan)) }
+            }
         }
     }
 
     private fun stepOnce() {
         if (busy) return
         auto = false
-        lastSignature = ""
-        noProgress = 0
-        step()
+        resetAutoState()
+        step(single = true)
     }
 
     private fun toggleAuto() {
-        if (auto) { stopAuto(); setStatus("Auto detenido."); return }
+        if (auto) { stopAuto(); busy = false; setStatus("Auto detenido."); return }
         if (busy) return
         auto = true
+        resetAutoState()
+        autoBtn.text = "Parar ■"
+        step(single = false)
+    }
+
+    private fun resetAutoState() {
         lastSignature = ""
         noProgress = 0
-        autoBtn.text = "Parar ■"
-        step()
+        emptyChecks = 0
+        popupSince = 0L
+        recentTaps = emptyList()
+        lastCount = -1
+        lastBatchExits = 0
+        suspicious = 0
     }
 
     private fun stopAuto() {
         auto = false
+        main.removeCallbacks(tick)
         if (::autoBtn.isInitialized) autoBtn.text = "Auto ▶"
     }
 
-    /** Analiza, toca el cerdito #1 y (en auto) repite. */
-    private fun step() {
+    /** Vuelve a mirar la pantalla después de `delay` ms (solo si el auto sigue encendido). */
+    private val tick = Runnable { busy = false; if (auto) step(single = false) }
+    private fun again(delay: Long) {
+        main.removeCallbacks(tick)
+        main.postDelayed(tick, delay)
+    }
+
+    /** Un ciclo del modo automático (o un solo toque, si single = true). */
+    private fun step(single: Boolean) {
         busy = true
-        setStatus("Mirando…")
-        analyzeScreen { pigs, plan ->
-            if (pigs.isEmpty()) {
-                busy = false; stopAuto(); overlay?.clear()
-                setStatus("No veo cerditos. ¿Nivel terminado? 🎉")
+        if (!single && emptyChecks == 0 && popupSince == 0L) setStatus("Mirando…")
+        analyzeScreen { scene, solver, plan ->
+            if (!single && !auto) { busy = false; return@analyzeScreen } // lo detuvieron mientras miraba
+            // 1) algo tapa el juego: cerrar con la X si se ve; si no, esperar a que se vaya
+            if (scene.obstructed) {
+                overlay?.clear()
+                if (single) { busy = false; setStatus("Hay una ventana encima del juego."); return@analyzeScreen }
+                emptyChecks = 0
+                val now = System.currentTimeMillis()
+                if (popupSince == 0L) popupSince = now
+                val cx = scene.closeX
+                val cy = scene.closeY
+                if (cx != null && cy != null) {
+                    setStatus("Hay una ventana (¿cofre?). La cierro con la X…")
+                    tap(cx, cy) { again(CLOSE_WAIT_MS) }
+                } else if (now - popupSince > POPUP_MAX_MS) {
+                    busy = false; stopAuto()
+                    setStatus("Hace más de ${POPUP_MAX_MS / 1000} s que algo tapa el juego. Auto detenido.")
+                } else {
+                    setStatus("Algo tapa el juego. Espero a que se quite…")
+                    again(POPUP_POLL_MS)
+                }
                 return@analyzeScreen
             }
+            popupSince = 0L
+
+            // 2) no hay cerditos: revisar de nuevo 3 veces en 30 s (puede estar cargando el próximo nivel)
+            if (plan == null || solver == null) {
+                overlay?.clear()
+                if (single) { busy = false; setStatus("No veo cerditos. ¿Nivel terminado? 🎉"); return@analyzeScreen }
+                if (emptyChecks >= EMPTY_CHECKS) {
+                    busy = false; stopAuto()
+                    setStatus("No aparecieron más cerditos en ${EMPTY_CHECKS * EMPTY_WAIT_MS / 1000} s. Auto terminado 🎉")
+                } else {
+                    emptyChecks++
+                    setStatus("No veo cerditos. Reviso de nuevo en ${EMPTY_WAIT_MS / 1000} s ($emptyChecks/$EMPTY_CHECKS)…")
+                    again(EMPTY_WAIT_MS)
+                }
+                return@analyzeScreen
+            }
+            emptyChecks = 0
+            val pigs = scene.pigs
+
+            // 3) un cerdito todavía va corriendo: esperar un poquito
+            if (!single && stillMoving(pigs)) { again(MOVING_RECHECK_MS); return@analyzeScreen }
+
+            // 4) desaparecieron más cerditos de los que saqué: algo los tapa a medias, mirar otra vez
+            if (!single && lastCount >= 0 && pigs.size < lastCount - lastBatchExits - 1 && suspicious < 2) {
+                suspicious++
+                again(SUSPICIOUS_RECHECK_MS)
+                return@analyzeScreen
+            }
+            suspicious = 0
+            recentTaps = emptyList()
+
             if (plan.moves.isEmpty()) {
                 busy = false; stopAuto()
                 overlay?.show(pigs, plan)
                 setStatus(describe(pigs, plan))
                 return@analyzeScreen
             }
-            // ¿cambió algo desde el toque anterior? (si no, el juego no está respondiendo como esperamos)
+
+            // 5) ¿cambió algo desde el toque anterior? si no, el juego no responde como esperamos
             val sig = signature(pigs)
             if (sig == lastSignature) noProgress++ else noProgress = 0
             lastSignature = sig
-            if (noProgress >= 2) {
+            if (noProgress >= 3) {
                 busy = false; stopAuto()
                 overlay?.show(pigs, plan)
                 setStatus("Toqué y nada se movió. Revisa que el juego esté a la vista, o mueve tú el cerdito naranjo.")
                 return@analyzeScreen
             }
 
+            // 6) tocar: varias salidas seguidas si sus recorridos no se cruzan
+            val batch = if (single) plan.moves.take(1) else solver.firstBatch(plan)
             overlay?.show(pigs, plan, onlyNext = true)
-            val next = plan.moves[0]
             setStatus(
-                "Quedan ${pigs.size}. " +
-                    (if (next.exits) "Saco uno con el camino libre…" else "Acerco un cerdito para abrir camino…")
+                "Quedan ${pigs.size}. " + when {
+                    !batch[0].exits -> "Acerco un cerdito para abrir camino…"
+                    batch.size > 1 -> "Saco ${batch.size} a la vez…"
+                    else -> "Saco uno con el camino libre…"
+                }
             )
-            val target = pigs[next.pig]
-            tap(target.cx, target.cy) {
-                main.postDelayed({
-                    busy = false
-                    if (auto) step() else analyze()
-                }, STEP_DELAY_MS)
+            lastCount = pigs.size
+            lastBatchExits = batch.count { it.exits }
+            recentTaps = batch.map { Tapped(pigs[it.pig], it.exits, it.dist) }
+            tapSequence(batch.map { pigs[it.pig] }) {
+                if (single) main.postDelayed({ busy = false; analyze() }, SETTLE_MS)
+                else again(if (batch[0].exits) SETTLE_MS else SLIDE_SETTLE_MS)
             }
+        }
+    }
+
+    /** Un cerdito que acabamos de tocar y que puede seguir en movimiento. */
+    private class Tapped(val pig: Pig, val exits: Boolean, val dist: Float)
+    private var recentTaps: List<Tapped> = emptyList()
+    private var emptyChecks = 0
+    private var popupSince = 0L
+    private var lastCount = -1
+    private var lastBatchExits = 0
+    private var suspicious = 0
+
+    /** ¿Hay un cerdito a medio camino en el recorrido de uno que acabamos de tocar? */
+    private fun stillMoving(pigs: List<Pig>): Boolean {
+        for (t in recentTaps) {
+            val a = t.pig
+            for (p in pigs) {
+                if (p.dx * a.dx + p.dy * a.dy < 0.9f) continue // mira hacia otro lado
+                val rx = p.cx - a.cx
+                val ry = p.cy - a.cy
+                val fwd = rx * a.dx + ry * a.dy
+                val lat = abs(-rx * a.dy + ry * a.dx)
+                if (lat > a.width * 0.5f || fwd < a.width * 0.25f) continue
+                if (t.exits || fwd < t.dist - a.width * 0.25f) return true
+            }
+        }
+        return false
+    }
+
+    private fun tapSequence(targets: List<Pig>, done: () -> Unit) {
+        if (targets.isEmpty()) { done(); return }
+        tap(targets[0].cx, targets[0].cy) {
+            if (targets.size == 1) done()
+            else main.postDelayed({ tapSequence(targets.drop(1), done) }, TAP_GAP_MS)
         }
     }
 
@@ -316,7 +428,7 @@ class PigService : AccessibilityService() {
         setPanelTouchable(false) // que el toque llegue al juego aunque caiga bajo el panel
         val path = Path().apply { moveTo(x, y) }
         val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0L, 60L))
+            .addStroke(GestureDescription.StrokeDescription(path, 0L, 40L))
             .build()
         val cb = object : AccessibilityService.GestureResultCallback() {
             override fun onCompleted(g: GestureDescription?) { setPanelTouchable(true); done() }
@@ -346,6 +458,16 @@ class PigService : AccessibilityService() {
     }
 
     companion object {
-        private const val STEP_DELAY_MS = 1300L // tiempo para que el cerdito termine de salir
+        private const val HIDE_MS = 70L                 // esconder el panel antes de capturar
+        private const val TAP_GAP_MS = 90L              // entre toques de una misma tanda
+        private const val SETTLE_MS = 350L              // después de sacar cerditos
+        private const val SLIDE_SETTLE_MS = 350L        // después de acercar uno
+        private const val MOVING_RECHECK_MS = 200L      // si alguno sigue corriendo
+        private const val SUSPICIOUS_RECHECK_MS = 600L  // si faltan cerditos de golpe
+        private const val EMPTY_WAIT_MS = 10_000L       // sin cerditos: 3 revisiones cada 10 s = 30 s
+        private const val EMPTY_CHECKS = 3
+        private const val POPUP_POLL_MS = 1_500L        // ventana encima: revisar cada 1,5 s
+        private const val POPUP_MAX_MS = 120_000L       // …hasta 2 minutos
+        private const val CLOSE_WAIT_MS = 1_200L        // después de tocar la X
     }
 }

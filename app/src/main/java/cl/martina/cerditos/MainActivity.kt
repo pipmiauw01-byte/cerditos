@@ -66,7 +66,9 @@ class MainActivity : Activity() {
             "• Abre el juego al inicio de un nivel. Aparece un panelcito 🐷 (arrástralo desde el título; tócalo para plegarlo).\n" +
             "• Analizar: pone un número sobre cada cerdito. Tócalos en ese orden. El naranjo es el próximo.\n" +
             "• Siguiente: toca por ti el próximo cerdito y vuelve a analizar.\n" +
-            "• Auto: saca todos los cerditos solo. Toca «Parar» cuando quieras.\n" +
+            "• Auto: juega solo, nivel tras nivel. Toca «Parar» cuando quieras.\n" +
+            "   – Si no ve cerditos, revisa otra vez 3 veces durante 30 s (por si carga el próximo nivel).\n" +
+            "   – Si aparece algo encima (cofre, aviso), espera a que se quite. Si tiene una X arriba a la derecha, la toca para cerrarla. Nunca toca «Get».\n" +
             "• Si hay cerditos sin salida, salen con ✕ rojo y uno con «OVNI» amarillo: ese es el que conviene quitar con el booster del OVNI.", 14.5f))
 
         root.addView(text("Funciona mejor si lo usas desde el comienzo del nivel: una vez que los cerditos quedan trabados entre ellos, ningún orden los saca sin un booster.", 13.5f, color = Color.rgb(110, 100, 95)))
