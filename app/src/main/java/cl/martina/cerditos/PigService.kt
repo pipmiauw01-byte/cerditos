@@ -3,13 +3,16 @@ package cl.martina.cerditos
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.annotation.SuppressLint
+import android.content.ContentValues
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.MediaStore
 import android.view.Display
 import android.view.Gravity
 import android.view.MotionEvent
@@ -118,7 +121,10 @@ class PigService : AccessibilityService() {
         body.addView(status)
 
         val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        row1.addView(button("Analizar", Color.rgb(46, 125, 50)) { analyze() })
+        val analyzeBtn = button("Analizar", Color.rgb(46, 125, 50)) { analyze() }
+        // mantener apretado: guarda la captura en la Galería para revisar qué ve la app
+        analyzeBtn.setOnLongClickListener { analyze(save = true); true }
+        row1.addView(analyzeBtn)
         row1.addView(button("Siguiente", Color.rgb(255, 109, 0)) { stepOnce() })
         body.addView(row1)
         val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -220,7 +226,16 @@ class PigService : AccessibilityService() {
         }, HIDE_MS)
     }
 
-    private fun analyzeScreen(done: (Scene, Solver?, Plan?) -> Unit) {
+    /** Rectángulo del panel en pantalla, para que la detección no lo confunda con una ventana del juego. */
+    private fun panelRect(): IntArray? {
+        val p = panel ?: return null
+        val loc = IntArray(2)
+        p.getLocationOnScreen(loc)
+        return intArrayOf(loc[0], loc[1], loc[0] + p.width, loc[1] + p.height)
+    }
+
+    private fun analyzeScreen(save: Boolean = false, done: (Scene, Solver?, Plan?) -> Unit) {
+        val ignore = panelRect()
         capture { bmp ->
             if (bmp == null) {
                 busy = false
@@ -229,7 +244,8 @@ class PigService : AccessibilityService() {
                 return@capture
             }
             worker.execute {
-                val scene = Detector.detect(bmp)
+                val scene = Detector.detect(bmp, ignore)
+                if (save) lastSaved = saveCapture(bmp)
                 bmp.recycle()
                 val solver = if (scene.pigs.isNotEmpty()) Solver(scene.pigs) else null
                 val plan = solver?.solve()
@@ -240,19 +256,39 @@ class PigService : AccessibilityService() {
 
     // ---------------------------------------------------------------- acciones
 
-    private fun analyze() {
+    private fun analyze(save: Boolean = false) {
         if (busy) return
         busy = true
         setStatus("Mirando…")
-        analyzeScreen { scene, _, plan ->
+        analyzeScreen(save) { scene, _, plan ->
             busy = false
-            when {
-                scene.obstructed -> { overlay?.clear(); setStatus("Hay una ventana encima del juego. Ciérrala y vuelve a analizar.") }
-                plan == null -> { overlay?.clear(); setStatus("No veo cerditos en pantalla.") }
-                else -> { overlay?.show(scene.pigs, plan); setStatus(describe(scene.pigs, plan)) }
+            var msg = when {
+                scene.obstructed -> { overlay?.clear(); "Hay una ventana encima del juego (${scene.reason})." }
+                plan == null -> { overlay?.clear(); "No veo cerditos en pantalla." }
+                else -> { overlay?.show(scene.pigs, plan); describe(scene.pigs, plan) }
             }
+            if (save) {
+                msg = (if (lastSaved) "📷 Captura guardada en Galería › Pictures › Cerditos.\n" else "No pude guardar la captura.\n") +
+                    "Vi ${scene.pigs.size} cerditos" + (if (scene.obstructed) " · ventana: ${scene.reason}" else "") + "\n" + msg
+            }
+            setStatus(msg)
         }
     }
+
+    @Volatile private var lastSaved = false
+
+    /** Guarda la captura (sin el panel) en Imágenes/Cerditos. No necesita permisos en Android 10+. */
+    private fun saveCapture(bmp: Bitmap): Boolean = runCatching {
+        val stamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date())
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, "cerditos_$stamp.png")
+            put(MediaStore.MediaColumns.MIME_TYPE, "image/png")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/Cerditos")
+        }
+        val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            ?: return@runCatching false
+        contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) } ?: false
+    }.getOrDefault(false)
 
     private fun stepOnce() {
         if (busy) return
@@ -303,7 +339,7 @@ class PigService : AccessibilityService() {
             // 1) algo tapa el juego: cerrar con la X si se ve; si no, esperar a que se vaya
             if (scene.obstructed) {
                 overlay?.clear()
-                if (single) { busy = false; setStatus("Hay una ventana encima del juego."); return@analyzeScreen }
+                if (single) { busy = false; setStatus("Hay una ventana encima del juego (${scene.reason})."); return@analyzeScreen }
                 emptyChecks = 0
                 val now = System.currentTimeMillis()
                 if (popupSince == 0L) popupSince = now
@@ -316,7 +352,7 @@ class PigService : AccessibilityService() {
                     busy = false; stopAuto()
                     setStatus("Hace más de ${POPUP_MAX_MS / 1000} s que algo tapa el juego. Auto detenido.")
                 } else {
-                    setStatus("Algo tapa el juego. Espero a que se quite…")
+                    setStatus("Algo tapa el juego (${scene.reason}). Espero a que se quite…")
                     again(POPUP_POLL_MS)
                 }
                 return@analyzeScreen
@@ -454,7 +490,7 @@ class PigService : AccessibilityService() {
     }
 
     companion object {
-        private const val HIDE_MS = 70L                 // esconder el panel antes de capturar
+        private const val HIDE_MS = 150L                // esconder el panel antes de capturar (que alcance a redibujar)
         private const val TAP_INTERVAL_MS = 1_000L      // ritmo del auto: un toque por segundo
         private const val SETTLE_MS = 450L              // espera antes de volver a mirar
         private const val MOVING_RECHECK_MS = 200L      // si alguno sigue corriendo

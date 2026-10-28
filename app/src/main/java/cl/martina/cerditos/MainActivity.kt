@@ -65,6 +65,7 @@ class MainActivity : Activity() {
         root.addView(text(
             "• Abre el juego al inicio de un nivel. Aparece un panelcito 🐷 (arrástralo desde el título; tócalo para plegarlo).\n" +
             "• Analizar: pone un número sobre cada cerdito. Tócalos en ese orden. El naranjo es el próximo.\n" +
+            "• Mantén apretado Analizar: guarda lo que ve la app en Galería › Pictures › Cerditos (sirve para reportar problemas).\n" +
             "• Siguiente: toca por ti el próximo cerdito y vuelve a analizar.\n" +
             "• Auto: juega solo, nivel tras nivel, a un cerdito por segundo. Toca «Parar» cuando quieras.\n" +
             "   – Si no ve cerditos, revisa otra vez 3 veces durante 30 s (por si carga el próximo nivel).\n" +

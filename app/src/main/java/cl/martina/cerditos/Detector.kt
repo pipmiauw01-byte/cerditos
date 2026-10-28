@@ -29,7 +29,8 @@ data class Scene(
     val pigs: List<Pig>,
     val obstructed: Boolean,
     val closeX: Float? = null,
-    val closeY: Float? = null
+    val closeY: Float? = null,
+    val reason: String = ""   // por qué se cree que hay algo encima (para el panel)
 )
 
 /**
@@ -52,7 +53,16 @@ object Detector {
         val h0 = bmp.height
         val full = IntArray(w0 * h0)
         bmp.getPixels(full, 0, w0, 0, 0, w0, h0)
-        return detect(full, w0, h0)
+        return detect(full, w0, h0, null)
+    }
+
+    /** Igual que detect(bmp), pero ignorando un rectángulo de pantalla [x0, y0, x1, y1] (el panel de la app). */
+    fun detect(bmp: Bitmap, ignore: IntArray?): Scene {
+        val w0 = bmp.width
+        val h0 = bmp.height
+        val full = IntArray(w0 * h0)
+        bmp.getPixels(full, 0, w0, 0, 0, w0, h0)
+        return detect(full, w0, h0, ignore)
     }
 
     private class Img(val px: IntArray, val w: Int, val h: Int) {
@@ -64,7 +74,7 @@ object Detector {
 
     private class Cand(val pig: Pig, val area: Int)
 
-    fun detect(full: IntArray, w0: Int, h0: Int): Scene {
+    fun detect(full: IntArray, w0: Int, h0: Int, ignore: IntArray? = null): Scene {
         val w = w0 / S
         val h = h0 / S
         val n = w * h
@@ -75,30 +85,26 @@ object Detector {
         }
         val img = Img(px, w, h)
 
+        // zona a ignorar (el panel de la app, por si alcanzó a salir en la captura)
+        val valid = BooleanArray(n) { true }
+        if (ignore != null) {
+            val ix0 = maxOf(0, ignore[0] / S); val iy0 = maxOf(0, ignore[1] / S)
+            val ix1 = minOf(w, ignore[2] / S + 1); val iy1 = minOf(h, ignore[3] / S + 1)
+            for (y in iy0 until iy1) for (x in ix0 until ix1) valid[y * w + x] = false
+        }
+
         // 1. máscara rosada (se ignoran la barra superior del juego y los botones de abajo)
         val pink = BooleanArray(n)
         val top = (h * 0.10).toInt()
         val bot = (h * 0.88).toInt()
-        var grassN = 0
-        var pinkN = 0
-        var darkN = 0
-        var foreignN = 0
         for (y in top until bot) {
             for (x in 0 until w) {
                 val i = y * w + x
+                if (!valid[i]) continue
                 val r = img.r(i); val g = img.g(i); val b = img.b(i)
-                val grass = g > r + 10 && g > b + 25 && g > 140
-                val pk = !grass && r > g + 8 && g - b < 30
-                pink[i] = pk
-                when {
-                    grass -> grassN++
-                    pk -> pinkN++
-                    g < 120 && r < 140 && b < 140 -> darkN++
-                    else -> foreignN++
-                }
+                pink[i] = r > g + 8 && g - b < 30 && !(g > r + 10 && g > b + 25)
             }
         }
-        val fieldN = maxOf(1, (bot - top) * w)
 
         // 2. manchas rosadas conectadas
         val comps = components(pink, w, h, minSize = (0.0002 * n).toInt())
@@ -108,33 +114,62 @@ object Detector {
         var med = median(firstPass.map { it.area })
 
         val cands = ArrayList<Cand>()
+        var biggestUnexplainedPink = 0 // mancha rosada grande que no resultó ser cerditos
         for (c in comps) {
             val f = features(c, img)
             val tooBig = if (f == null) (med == 0 || c.size > 1.6 * med) else (med > 0 && f.area > 1.6 * med)
             if (tooBig) {
-                for (part in split(c, w, if (med > 0) med else c.size / 2)) features(part, img)?.let { cands.add(it) }
+                var found = 0
+                for (part in split(c, w, if (med > 0) med else c.size / 2)) features(part, img)?.let { cands.add(it); found++ }
+                if (found == 0 && c.size > biggestUnexplainedPink) biggestUnexplainedPink = c.size
             } else if (f != null) cands.add(f)
         }
         // todos los cerditos son del mismo tamaño: se descarta lo que se aleje mucho de la mediana
         med = median(cands.map { it.area })
         val kept = cands.filter { it.area >= 0.5 * med && it.area <= 1.6 * med }
-        val explained = kept.sumOf { it.area }
 
-        // 4. ¿Hay algo encima del juego?
-        val grassFrac = grassN.toFloat() / fieldN
-        val darkFrac = darkN.toFloat() / fieldN
-        val obstructed = grassFrac < 0.35f ||                       // pantalla oscurecida (cofre, ventana)
-            foreignN.toFloat() / fieldN > 0.06f ||                   // cartel claro o de otro color
-            darkFrac > 0.05f ||                                      // franja oscura / anuncio
-            (kept.isNotEmpty() && pinkN - explained > 4 * med) ||    // cartel rosado que no es cerdito
-            (kept.isEmpty() && pinkN > 0.02f * fieldN)
+        // 4. ¿Hay algo encima del juego? Se mira la franja central (sin el marcador ni los botones).
+        //    El color de fondo se aprende de la propia captura (el pasto puede cambiar de tono entre
+        //    niveles). Una ventana se nota como una mancha grande que no es ni fondo ni cerdito,
+        //    o como una mancha rosada enorme que no tiene forma de cerditos.
+        val sTop = (h * 0.20).toInt()
+        val sBot = (h * 0.85).toInt()
+        val hist = IntArray(4096)
+        var regionN = 0
+        for (y in sTop until sBot) for (x in 0 until w) {
+            val i = y * w + x
+            if (!valid[i]) continue
+            hist[((img.r(i) shr 4) shl 8) or ((img.g(i) shr 4) shl 4) or (img.b(i) shr 4)]++
+            regionN++
+        }
+        var mode = 0
+        for (k in 1 until 4096) if (hist[k] > hist[mode]) mode = k
+        val bgR = ((mode shr 8) and 15) * 16 + 8
+        val bgG = ((mode shr 4) and 15) * 16 + 8
+        val bgB = (mode and 15) * 16 + 8
+        val other = BooleanArray(n)
+        for (y in sTop until sBot) for (x in 0 until w) {
+            val i = y * w + x
+            if (!valid[i] || pink[i]) continue
+            val dist = abs(img.r(i) - bgR) + abs(img.g(i) - bgG) + abs(img.b(i) - bgB)
+            other[i] = dist >= 90
+        }
+        val bigOther = largestComponent(other, w, h)
+        val region = maxOf(1, regionN)
+        val reason = when {
+            bigOther > 0.04f * region -> "cartel encima (${100 * bigOther / region}% de la pantalla)"
+            kept.isNotEmpty() && biggestUnexplainedPink > 6 * med -> "mancha rosada grande"
+            kept.isEmpty() && biggestUnexplainedPink > 0.05f * region -> "mancha rosada grande"
+            else -> ""
+        }
+        val obstructed = reason.isNotEmpty()
 
         var cx: Float? = null
         var cy: Float? = null
         if (obstructed) {
             findCloseButton(img)?.let { (x, y) -> cx = (x + 0.5f) * S; cy = (y + 0.5f) * S }
         }
-        return Scene(if (obstructed) emptyList() else kept.map { it.pig }, obstructed, cx, cy)
+        return Scene(if (obstructed) emptyList() else kept.map { it.pig }, obstructed, cx, cy, reason)
     }
 
     private fun median(v: List<Int>): Int = if (v.isEmpty()) 0 else v.sorted()[v.size / 2]
@@ -164,6 +199,32 @@ object Detector {
             if (cnt >= minSize) out.add(buf.copyOf(cnt))
         }
         return out
+    }
+
+    /** Tamaño de la componente conectada más grande de la máscara. */
+    private fun largestComponent(mask: BooleanArray, w: Int, h: Int): Int {
+        val n = w * h
+        val visited = BooleanArray(n)
+        val stack = IntArray(n)
+        var best = 0
+        for (seed in 0 until n) {
+            if (!mask[seed] || visited[seed]) continue
+            var sp = 0
+            var cnt = 0
+            stack[sp++] = seed
+            visited[seed] = true
+            while (sp > 0) {
+                val p = stack[--sp]
+                cnt++
+                val x = p % w
+                if (x + 1 < w) { val q = p + 1; if (mask[q] && !visited[q]) { visited[q] = true; stack[sp++] = q } }
+                if (x > 0) { val q = p - 1; if (mask[q] && !visited[q]) { visited[q] = true; stack[sp++] = q } }
+                if (p + w < n) { val q = p + w; if (mask[q] && !visited[q]) { visited[q] = true; stack[sp++] = q } }
+                if (p - w >= 0) { val q = p - w; if (mask[q] && !visited[q]) { visited[q] = true; stack[sp++] = q } }
+            }
+            if (cnt > best) best = cnt
+        }
+        return best
     }
 
     /** Si la mancha parece un cerdito (alargada, con ojos cerca de un extremo), lo devuelve. */
