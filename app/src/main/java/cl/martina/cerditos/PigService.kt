@@ -42,7 +42,7 @@ class PigService : AccessibilityService() {
 
     private var busy = false
     private var auto = false
-    private var lastCount = -1
+    private var lastSignature = ""
     private var noProgress = 0
 
     private val dp get() = resources.displayMetrics.density
@@ -227,7 +227,7 @@ class PigService : AccessibilityService() {
             worker.execute {
                 val pigs = Detector.detect(bmp)
                 bmp.recycle()
-                val plan = Solver.solve(pigs)
+                val plan = Solver(pigs).solve()
                 main.post { done(pigs, plan) }
             }
         }
@@ -249,7 +249,7 @@ class PigService : AccessibilityService() {
     private fun stepOnce() {
         if (busy) return
         auto = false
-        lastCount = -1
+        lastSignature = ""
         noProgress = 0
         step()
     }
@@ -258,7 +258,7 @@ class PigService : AccessibilityService() {
         if (auto) { stopAuto(); setStatus("Auto detenido."); return }
         if (busy) return
         auto = true
-        lastCount = -1
+        lastSignature = ""
         noProgress = 0
         autoBtn.text = "Parar ■"
         step()
@@ -279,24 +279,30 @@ class PigService : AccessibilityService() {
                 setStatus("No veo cerditos. ¿Nivel terminado? 🎉")
                 return@analyzeScreen
             }
-            if (plan.order.isEmpty()) {
+            if (plan.moves.isEmpty()) {
                 busy = false; stopAuto()
                 overlay?.show(pigs, plan)
                 setStatus(describe(pigs, plan))
                 return@analyzeScreen
             }
-            if (pigs.size >= lastCount && lastCount != -1) noProgress++ else noProgress = 0
-            lastCount = pigs.size
-            if (noProgress >= 3) {
+            // ¿cambió algo desde el toque anterior? (si no, el juego no está respondiendo como esperamos)
+            val sig = signature(pigs)
+            if (sig == lastSignature) noProgress++ else noProgress = 0
+            lastSignature = sig
+            if (noProgress >= 2) {
                 busy = false; stopAuto()
                 overlay?.show(pigs, plan)
-                setStatus("Toqué 3 veces y no salió ninguno. Revisa que el juego esté a la vista.")
+                setStatus("Toqué y nada se movió. Revisa que el juego esté a la vista, o mueve tú el cerdito naranjo.")
                 return@analyzeScreen
             }
 
             overlay?.show(pigs, plan, onlyNext = true)
-            setStatus("Quedan ${pigs.size}. Saco el que está libre…")
-            val target = pigs[plan.order[0]]
+            val next = plan.moves[0]
+            setStatus(
+                "Quedan ${pigs.size}. " +
+                    (if (next.exits) "Saco uno con el camino libre…" else "Acerco un cerdito para abrir camino…")
+            )
+            val target = pigs[next.pig]
             tap(target.cx, target.cy) {
                 main.postDelayed({
                     busy = false
@@ -319,12 +325,24 @@ class PigService : AccessibilityService() {
         if (!dispatchGesture(gesture, cb, main)) { setPanelTouchable(true); done() }
     }
 
-    private fun describe(pigs: List<Pig>, plan: Plan): String = when {
-        pigs.isEmpty() -> "No veo cerditos en pantalla."
-        plan.stuck.isEmpty() -> "${pigs.size} cerditos · salen todos ✓\nTócalos en orden: 1, 2, 3…"
-        plan.order.isEmpty() -> "⚠ Ningún cerdito tiene salida.\nUsa el OVNI en el marcado en amarillo."
-        else -> "⚠ ${plan.stuck.size} de ${pigs.size} quedarán atascados.\n" +
-            "Saca primero los ${plan.order.size} numerados y luego usa el OVNI en el amarillo."
+    private fun signature(pigs: List<Pig>): String {
+        val q = (pigs.map { it.width }.average().toFloat() / 3f).coerceAtLeast(1f)
+        return pigs.map { "${(it.cx / q).toInt()},${(it.cy / q).toInt()}" }.sorted().joinToString(";")
+    }
+
+    private fun describe(pigs: List<Pig>, plan: Plan): String {
+        val slides = plan.moves.count { !it.exits }
+        val slideNote = if (slides > 0)
+            "\n$slides de esos toques solo hacen avanzar un cerdito hasta chocar (flecha corta): es parte de la solución."
+        else ""
+        return when {
+            pigs.isEmpty() -> "No veo cerditos en pantalla."
+            plan.complete -> "${pigs.size} cerditos · se resuelve en ${plan.moves.size} toques ✓\n" +
+                "Tócalos en orden: 1, 2, 3… (el naranjo es el próximo)." + slideNote
+            plan.moves.isEmpty() -> "⚠ Ningún cerdito puede moverse.\nUsa el OVNI en el marcado en amarillo."
+            else -> "⚠ No hay forma de sacarlos todos. Sigue los ${plan.moves.size} toques numerados " +
+                "y después toca Analizar: te marcará cuál quitar con el OVNI." + slideNote
+        }
     }
 
     companion object {

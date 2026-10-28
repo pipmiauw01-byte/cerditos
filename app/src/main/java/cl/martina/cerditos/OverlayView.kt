@@ -42,15 +42,26 @@ class OverlayView(context: Context) : View(context) {
         canvas.save()
         canvas.translate(-loc[0].toFloat(), -loc[1].toFloat())
 
-        val order = if (onlyNext) p.order.take(1) else p.order
-        // del último al primero, para que el #1 quede encima
-        for (k in order.indices.reversed()) {
-            val pig = pigs[order[k]]
-            val first = k == 0
-            val color = if (first) Color.rgb(255, 109, 0) else Color.argb(220, 35, 35, 45)
-            arrow(canvas, pig, if (first) Color.rgb(255, 109, 0) else Color.argb(200, 30, 90, 220))
-            badge(canvas, pig, (k + 1).toString(), color, if (first) 0.48f else 0.36f)
+        val moves = if (onlyNext) p.moves.take(1) else p.moves
+        // números de toque por cerdito (un cerdito puede tocarse más de una vez: "2·6")
+        val steps = HashMap<Int, MutableList<Int>>()
+        moves.forEachIndexed { k, m -> steps.getOrPut(m.pig) { ArrayList() }.add(k + 1) }
+        val next = moves.firstOrNull()
+        for ((pigIdx, nums) in steps) {
+            if (pigIdx == next?.pig) continue
+            val pig = pigs[pigIdx]
+            val first = moves.first { it.pig == pigIdx }
+            arrow(canvas, pig, Color.argb(190, 30, 90, 220), if (first.exits) null else first.dist)
+            badge(canvas, pig, nums.joinToString("·"), Color.argb(220, 35, 35, 45), 0.36f, small = nums.size > 1)
         }
+        if (next != null) { // el próximo toque, encima de todo y en naranjo
+            val pig = pigs[next.pig]
+            val orange = Color.rgb(255, 109, 0)
+            arrow(canvas, pig, orange, if (next.exits) null else next.dist)
+            val nums = steps[next.pig] ?: listOf(1)
+            badge(canvas, pig, nums.joinToString("·"), orange, 0.48f, small = nums.size > 1)
+        }
+        if (onlyNext) { canvas.restore(); return }
         for (i in p.stuck) {
             val pig = pigs[i]
             val isUfo = i == p.ufo
@@ -78,10 +89,19 @@ class OverlayView(context: Context) : View(context) {
         c.drawText(label, pig.cx, pig.cy - (text.descent() + text.ascent()) / 2, text)
     }
 
-    private fun arrow(c: Canvas, pig: Pig, color: Int) {
-        val len = pig.width * 1.25f
+    /** Flecha hacia donde corre. dist = null: sale (flecha larga); si no, avanza esa distancia. */
+    private fun arrow(c: Canvas, pig: Pig, color: Int, dist: Float?) {
         val sx = pig.cx + pig.dx * pig.width * 0.45f
         val sy = pig.cy + pig.dy * pig.width * 0.45f
+        val len = if (dist == null) pig.width * 1.4f else (pig.length / 2f + dist).coerceAtLeast(pig.width * 0.8f)
+        if (dist != null) { // marca dónde se detiene
+            stroke.color = color
+            stroke.strokeWidth = pig.width * 0.06f
+            val ex = pig.cx + pig.dx * len
+            val ey = pig.cy + pig.dy * len
+            val r = pig.width * 0.35f
+            c.drawLine(ex - pig.dy * r, ey + pig.dx * r, ex + pig.dy * r, ey - pig.dx * r, stroke)
+        }
         val ex = pig.cx + pig.dx * len
         val ey = pig.cy + pig.dy * len
         stroke.color = color

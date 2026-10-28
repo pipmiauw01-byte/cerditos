@@ -12,14 +12,20 @@ import kotlin.math.sqrt
  * Un cerdito detectado en pantalla.
  * (cx, cy): centro en píxeles de pantalla.
  * (dx, dy): vector unitario hacia donde mira la cabeza (= hacia donde corre al tocarlo).
- * width: ancho del cuerpo en píxeles (sirve para escalar todo lo demás).
+ * width, length: ancho y largo del cuerpo en píxeles.
  */
-data class Pig(val cx: Float, val cy: Float, val dx: Float, val dy: Float, val width: Float)
+data class Pig(
+    val cx: Float, val cy: Float,
+    val dx: Float, val dy: Float,
+    val width: Float, val length: Float
+)
 
 /**
  * Detección por color, pensada para el juego de cerditos rosados sobre pasto verde.
- *  1. Píxel "de cerdito" = rosado (R > G) o contorno café oscuro. El pasto tiene G >> R.
- *  2. Se agrupan en manchas conectadas; se quedan las de tamaño parecido a la mediana.
+ *  1. Píxel "de cerdito" = rosado (R > G y B parecido a G) o contorno café oscuro.
+ *     El pasto tiene G >> R; las monedas y el trofeo son dorados (B mucho menor que G).
+ *  2. Se agrupan en manchas conectadas. Una mancha es cerdito solo si es mayormente rosada,
+ *     alargada y tiene ojos cerca de un extremo (así se descartan monedas, frasco, trofeo, foto).
  *  3. El eje largo de cada mancha (PCA) da la orientación del cuerpo.
  *  4. Los ojos (puntos casi negros dentro del cuerpo) dicen en qué extremo está la cabeza.
  */
@@ -46,7 +52,8 @@ object Detector {
 
         // 1. máscara (se ignoran la barra superior del juego y los botones de abajo)
         val isPig = BooleanArray(n)
-        val top = (h * 0.12).toInt()
+        val isPink = BooleanArray(n)
+        val top = (h * 0.10).toInt()
         val bot = (h * 0.88).toInt()
         for (y in top until bot) {
             for (x in 0 until w) {
@@ -55,7 +62,9 @@ object Detector {
                 val r = (c shr 16) and 0xff
                 val g = (c shr 8) and 0xff
                 val b = c and 0xff
-                isPig[i] = r > g + 8 || (g < 120 && r < 140 && b < 140)
+                val pink = r > g + 8 && g - b < 30
+                isPink[i] = pink
+                isPig[i] = pink || (g < 120 && r < 140 && b < 140)
             }
         }
 
@@ -86,14 +95,13 @@ object Detector {
         }
 
         val sizes = IntArray(starts.size) { ends[it] - starts[it] }
-        val big = sizes.filter { it > 0.0003 * n }.sorted()
-        if (big.isEmpty()) return emptyList()
-        val med = big[big.size / 2]
-
-        val pigs = ArrayList<Pig>()
+        val cands = ArrayList<Pair<Pig, Int>>()
         for (k in starts.indices) {
             val sz = sizes[k]
-            if (sz < 0.5 * med || sz > 1.6 * med) continue
+            if (sz < 0.0003 * n) continue
+            var pinkCount = 0
+            for (m in starts[k] until ends[k]) if (isPink[members[m]]) pinkCount++
+            if (pinkCount < 0.55 * sz) continue // dorado, gris, foto: no es cerdito
             var sx = 0.0
             var sy = 0.0
             var minX = w
@@ -153,19 +161,26 @@ object Detector {
                 val lum = ((c shr 16) and 0xff) + ((c shr 8) and 0xff) + (c and 0xff)
                 if (lum < 110) { eSum += proj[idx]; eN++ }
             }
-            val s = if (eN >= 1 && eSum < 0) -1.0 else 1.0
+            if (eN < 2) continue                         // sin ojos: no es cerdito
+            val eyePos = eSum / eN
+            if (abs(eyePos) < 0.3 * hl) continue         // "ojos" al centro: no es cerdito
+            val s = if (eyePos < 0) -1.0 else 1.0
 
-            pigs.add(
+            cands.add(
                 Pig(
                     cx = ((mx + 0.5) * S).toFloat(),
                     cy = ((my + 0.5) * S).toFloat(),
                     dx = (ax * s).toFloat(),
                     dy = (ay * s).toFloat(),
-                    width = (2 * hw * S).toFloat()
-                )
+                    width = (2 * hw * S).toFloat(),
+                    length = (2 * hl * S).toFloat()
+                ) to sz
             )
         }
-        return pigs
+        if (cands.isEmpty()) return emptyList()
+        // todos los cerditos son del mismo tamaño: se descarta lo que se aleje mucho de la mediana
+        val med = cands.map { it.second }.sorted()[cands.size / 2]
+        return cands.filter { it.second >= 0.5 * med && it.second <= 1.6 * med }.map { it.first }
     }
 
     private fun percentileAbs(v: DoubleArray, q: Double): Double {
