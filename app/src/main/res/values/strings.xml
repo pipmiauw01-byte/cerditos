@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Cerditos</string>
+    <string name="service_name">Cerditos – ayudante</string>
+    <string name="service_desc">Mira la pantalla del juego de cerditos, calcula en qué orden sacarlos para que ninguno se atasque y, si lo pides, los toca por ti. No lee ni guarda nada más.</string>
+</resources>

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- orejas -->
+    <path android:fillColor="#F7C9C4" android:strokeColor="#5A3A35" android:strokeWidth="2.5"
+        android:pathData="M36,42 L32,28 L46,36 Z M72,42 L76,28 L62,36 Z" />
+    <!-- cara -->
+    <path android:fillColor="#FADAD5" android:strokeColor="#5A3A35" android:strokeWidth="2.5"
+        android:pathData="M54,34 a22,20 0 1,1 -0.1,0 Z" />
+    <!-- hocico -->
+    <path android:fillColor="#F2A9A0" android:strokeColor="#5A3A35" android:strokeWidth="2"
+        android:pathData="M54,56 a9,6.5 0 1,1 -0.1,0 Z" />
+    <path android:fillColor="#5A3A35" android:pathData="M50,62 a1.8,1.8 0 1,1 -0.1,0 Z M58,62 a1.8,1.8 0 1,1 -0.1,0 Z" />
+    <!-- ojos -->
+    <path android:fillColor="#222222" android:pathData="M45,48 a2.6,2.6 0 1,1 -0.1,0 Z M63,48 a2.6,2.6 0 1,1 -0.1,0 Z" />
+    <!-- flecha de salida -->
+    <path android:fillColor="#00000000" android:strokeColor="#FF6D00" android:strokeWidth="4"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M76,76 L86,86 M78,87 L86,86 L87,78" />
+</vector>
